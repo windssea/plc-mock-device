@@ -1,0 +1,27 @@
+services:
+  simulator:
+    build: .
+    environment:
+      IOT_SIM_CONFIG: /config/devices.yaml
+      IOT_SIM_DATABASE: /data/iot-simulator.db
+      IOT_SIM_WEB_HOST: 0.0.0.0
+    volumes:
+      - simulator-data:/data
+      - ./config/example.yaml:/config/devices.yaml:ro
+    ports:
+      - "8080:8080"
+      - "4840:4840"
+      - "1502:1502"
+    restart: unless-stopped
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    profiles: ["demo"]
+    command: ["mosquitto", "-c", "/mosquitto-no-auth.conf"]
+    volumes:
+      - ./deploy/mosquitto-no-auth.conf:/mosquitto-no-auth.conf:ro
+    ports:
+      - "1883:1883"
+
+volumes:
+  simulator-data:

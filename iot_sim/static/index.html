@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PLCnext IoT 设备模拟器</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header>
+    <div><h1>IoT 设备模拟器</h1><p>OPC UA · MQTT · Modbus TCP</p></div>
+    <div id="revision" class="pill">配置加载中</div>
+  </header>
+  <nav>
+    <button data-tab="overview" class="active">运行总览</button>
+    <button data-tab="devices">设备管理</button>
+    <button data-tab="config">协议与配置</button>
+  </nav>
+  <main>
+    <section id="overview" class="tab active">
+      <div id="adapterCards" class="cards"></div>
+      <div class="panel"><h2>设备状态</h2><div id="statusTable"></div></div>
+    </section>
+    <section id="devices" class="tab">
+      <div class="toolbar"><h2>设备</h2><button id="newDevice" class="primary">新增设备</button></div>
+      <div id="deviceTable" class="panel"></div>
+    </section>
+    <section id="config" class="tab">
+      <div class="toolbar"><div><h2>协议设置</h2><p class="hint">修改后保存到 SQLite 当前配置，不会改写启动 YAML。</p></div></div>
+      <form id="protocolSettingsForm" novalidate>
+        <div id="protocolSettingsErrors" class="error-summary" role="alert" aria-live="assertive" tabindex="-1" hidden></div>
+        <div class="endpoint-grid">
+          <fieldset class="endpoint-card">
+            <legend>OPC UA Server</legend>
+            <label class="inline-check"><input type="checkbox" data-config-path="opcua.enabled"> 启用 OPC UA</label>
+            <div class="grid">
+              <label>监听地址<input data-config-path="opcua.host" required></label>
+              <label>端口<input data-config-path="opcua.port" type="number" min="1" max="65535" step="1" required></label>
+              <label>Endpoint 路径<input data-config-path="opcua.endpoint_path" required><small class="field-help">例如 /iot-simulator/</small></label>
+              <label>服务名称<input data-config-path="opcua.server_name" required></label>
+              <label>Application URI<input data-config-path="opcua.application_uri" required></label>
+              <label>Namespace URI<input data-config-path="opcua.namespace_uri" required></label>
+            </div>
+          </fieldset>
+          <fieldset class="endpoint-card">
+            <legend>默认 MQTT 连接</legend>
+            <label class="inline-check"><input type="checkbox" data-config-path="mqtt.enabled"> 启用 MQTT</label>
+            <p class="hint">供 connection_id 为 default 的设备使用。需要不同 Broker、账号或 TLS 参数时，请在下方新增连接。</p>
+            <div class="grid">
+              <label>Broker 地址<input data-config-path="mqtt.host" required></label>
+              <label>端口<input data-config-path="mqtt.port" type="number" min="1" max="65535" step="1" required></label>
+              <label>协议版本<select data-config-path="mqtt.protocol_version"><option value="3.1.1">3.1.1</option><option value="5.0">5.0</option></select></label>
+              <label>共享 Client ID<input data-config-path="mqtt.client_id" required></label>
+              <label>Keepalive（秒）<input data-config-path="mqtt.keepalive" type="number" min="1" max="65535" step="1" required></label>
+              <label>用户名（可选）<input data-config-path="mqtt.username"></label>
+              <label>密码环境变量名（可选）<input data-config-path="mqtt.password_env" placeholder="例如 MQTT_PASSWORD" aria-describedby="defaultMqttPasswordEnvHelp"><small id="defaultMqttPasswordEnvHelp" class="field-help">这里只填写环境变量名称，不填写真实密码；进程会从该环境变量读取密码。</small></label>
+              <label>最小重连间隔（秒）<input data-config-path="mqtt.reconnect_min_seconds" type="number" min="1" step="1" required></label>
+              <label>最大重连间隔（秒）<input data-config-path="mqtt.reconnect_max_seconds" type="number" min="1" step="1" required></label>
+              <label>最大在途消息数<input data-config-path="mqtt.max_inflight_messages" type="number" min="1" step="1" required></label>
+              <label>最大队列消息数<input data-config-path="mqtt.max_queued_messages" type="number" min="1" step="1" required></label>
+            </div>
+          </fieldset>
+          <fieldset class="endpoint-card">
+            <legend>Modbus TCP Server</legend>
+            <label class="inline-check"><input type="checkbox" data-config-path="modbus.enabled"> 启用 Modbus TCP</label>
+            <div class="grid">
+              <label>监听地址<input data-config-path="modbus.host" required></label>
+              <label>端口<input data-config-path="modbus.port" type="number" min="1" max="65535" step="1" required></label>
+            </div>
+          </fieldset>
+        </div>
+        <div class="dialog-actions"><button id="saveProtocolSettings" type="submit" class="primary">保存协议设置</button></div>
+        <div id="protocolApplyResult" class="apply-result" role="status" aria-live="polite" hidden></div>
+      </form>
+      <section class="panel mqtt-connections-panel" aria-labelledby="mqttConnectionsTitle">
+        <div class="toolbar">
+          <div><h3 id="mqttConnectionsTitle">MQTT 连接</h3><p class="hint">每个连接独立保存 Broker、认证和客户端参数到 SQLite，MQTT 设备通过 connection_id 选择连接。</p></div>
+          <button id="newMqttConnection" type="button" class="primary">新增 MQTT 连接</button>
+        </div>
+        <div id="mqttConnectionTable" aria-live="polite"><p class="hint">连接加载中</p></div>
+      </section>
+      <details class="advanced-config">
+        <summary>高级：完整 JSON 与 YAML 备份</summary>
+        <div class="toolbar">
+          <p class="hint">高级编辑会修改完整 SQLite 当前配置；YAML 仅用于导入、导出备份。</p>
+          <div>
+            <label class="file-button">导入 YAML 备份<input id="importFile" type="file" accept=".yaml,.yml"></label>
+            <button id="exportConfig" type="button">导出 YAML 备份</button>
+            <button id="validateConfig" type="button">校验 JSON</button>
+            <button id="saveConfig" type="button">保存完整 JSON</button>
+          </div>
+        </div>
+        <textarea id="configEditor" class="code" spellcheck="false" aria-label="完整配置 JSON"></textarea>
+      </details>
+    </section>
+  </main>
+
+  <dialog id="deviceDialog">
+    <form id="deviceForm" method="dialog" novalidate>
+      <div class="toolbar"><h2 id="dialogTitle">设备</h2><button type="button" id="closeDialog">关闭</button></div>
+      <div id="formErrors" class="error-summary" role="alert" aria-live="assertive" tabindex="-1" hidden></div>
+      <div class="grid">
+        <label>设备编号<input name="id" required maxlength="128" pattern="[A-Za-z0-9_.\-]+"></label>
+        <label>名称<input name="name" required maxlength="256"></label>
+        <label>协议<select name="protocol"><option value="opcua">OPC UA</option><option value="mqtt">MQTT</option><option value="modbus">Modbus TCP</option></select></label>
+        <label id="mqttDeviceConnectionField" hidden>MQTT 连接<select name="mqtt_connection_id"></select><small class="field-help">选择此设备上报数据时使用的 Broker 和认证配置。</small></label>
+        <label>默认周期（ms）<input name="default_interval_ms" type="number" min="1000" value="1000"></label>
+        <label><input name="enabled" type="checkbox" checked> 启用</label>
+        <label>期望状态<select name="desired_state"><option value="running">运行</option><option value="stopped">暂停</option></select></label>
+      </div>
+      <label>协议参数（JSON）<textarea name="protocol_config" class="small-code" aria-describedby="protocolConfigHelp">{}</textarea><small id="protocolConfigHelp" class="field-help" aria-live="polite">OPC UA 可使用空对象 {}，也可设置 object_name。</small></label>
+      <div class="toolbar"><h3>数据点</h3><button type="button" id="addSignal">新增数据点</button></div>
+      <div id="signalEditor"></div>
+      <div class="dialog-actions"><button type="button" id="cancelDevice">取消</button><button type="submit" class="primary">保存设备</button></div>
+    </form>
+  </dialog>
+  <dialog id="mqttConnectionDialog">
+    <form id="mqttConnectionForm" method="dialog" novalidate>
+      <div class="toolbar"><h2 id="mqttConnectionDialogTitle">MQTT 连接</h2><button type="button" id="closeMqttConnectionDialog">关闭</button></div>
+      <div id="mqttConnectionErrors" class="error-summary" role="alert" aria-live="assertive" tabindex="-1" hidden></div>
+      <div class="grid mqtt-connection-grid">
+        <label>连接编号<input data-connection-field="id" required maxlength="128" pattern="[A-Za-z0-9_.\-]+"><small class="field-help">设备通过 connection_id 引用，保存后不建议修改。</small></label>
+        <label>连接名称<input data-connection-field="name" required maxlength="256"></label>
+        <label class="inline-check"><input type="checkbox" data-connection-field="enabled"> 启用此连接</label>
+        <label>Broker 地址<input data-connection-field="host" required placeholder="localhost"></label>
+        <label>端口<input data-connection-field="port" type="number" min="1" max="65535" step="1" required value="1883"></label>
+        <label>传输方式<select data-connection-field="transport"><option value="tcp">MQTT TCP</option></select></label>
+        <label>MQTT 协议版本<select data-connection-field="protocol_version"><option value="3.1.1">3.1.1</option><option value="5.0">5.0</option></select></label>
+        <label>Client ID<input data-connection-field="client_id" required></label>
+        <label>Keepalive（秒）<input data-connection-field="keepalive" type="number" min="1" max="65535" step="1" required value="60"></label>
+        <label>用户名（可选）<input data-connection-field="username" autocomplete="username"></label>
+        <label>密码（可选）<input data-connection-field="password" type="password" autocomplete="new-password" aria-describedby="mqttStoredPasswordHelp"><small id="mqttStoredPasswordHelp" class="field-help">填写后将保存到本地 SQLite，请限制数据库文件访问权限。</small></label>
+        <label id="clearMqttPasswordField" class="inline-check" hidden><input type="checkbox" data-connection-control="clear_password"> 清除已保存密码</label>
+        <label>密码环境变量名（可选）<input data-connection-field="password_env" placeholder="例如 MQTT_PASSWORD"><small class="field-help">与明文密码二选一，运行进程从该环境变量读取密码。</small></label>
+        <label class="inline-check"><input type="checkbox" data-connection-field="tls_enabled"> 启用 TLS</label>
+        <label>最小重连间隔（秒）<input data-connection-field="reconnect_min_seconds" type="number" min="1" step="1" required value="1"></label>
+        <label>最大重连间隔（秒）<input data-connection-field="reconnect_max_seconds" type="number" min="1" step="1" required value="30"></label>
+        <label>最大在途消息数<input data-connection-field="max_inflight_messages" type="number" min="1" step="1" required value="20"></label>
+        <label>最大队列消息数<input data-connection-field="max_queued_messages" type="number" min="1" step="1" required value="1000"></label>
+      </div>
+      <div class="dialog-actions"><button type="button" id="cancelMqttConnection">取消</button><button type="submit" class="primary">保存连接</button></div>
+    </form>
+  </dialog>
+  <template id="signalTemplate">
+    <article class="signal-card">
+      <div class="toolbar"><strong>数据点</strong><button type="button" class="danger remove-signal">删除</button></div>
+      <div class="grid signal-common">
+        <label>点位编号<input data-key="id" required maxlength="128" pattern="[A-Za-z0-9_.\-]+"></label><label>名称<input data-key="name" required maxlength="256"></label>
+        <label>单位<input data-key="unit" maxlength="64"></label>
+        <label>数值类型<select data-key="value_type" class="value-type"><option>bool</option><option>int16</option><option>uint16</option><option>int32</option><option>uint32</option><option>float32</option><option>float64</option></select></label>
+        <label>点位周期（空=设备默认）<input data-key="interval_ms" type="number" min="1000" step="1"><small class="field-help">填写后覆盖设备默认周期，最小 1000 ms。</small></label>
+        <label>生成方式<select data-key="generator.type" class="generator-type"><option value="random_range">区间随机</option><option value="increment">递增</option></select><small class="field-help generator-policy" aria-live="polite"></small></label>
+      </div>
+      <div class="grid generator-fields"></div>
+      <div class="grid binding-fields"></div>
+    </article>
+  </template>
+  <div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+  <script src="/static/signal-form.js"></script>
+  <script src="/static/protocol-form.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

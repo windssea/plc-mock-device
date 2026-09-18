@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plcnext-mock-device"
+version = "0.1.0"
+description = "Lightweight configurable OPC UA, MQTT and Modbus TCP device simulator"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+  "asyncua==2.0.1",
+  "paho-mqtt==2.1.0",
+  "pymodbus==3.13.1",
+  "fastapi==0.139.0",
+  "uvicorn==0.51.0",
+  "pydantic==2.13.4",
+  "PyYAML==6.0.3",
+]
+
+[project.optional-dependencies]
+test = [
+  "httpx>=0.28,<0.29",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.0,<2",
+]
+
+[project.scripts]
+iot-sim = "iot_sim.main:main"
+
+[tool.setuptools.packages.find]
+include = ["iot_sim*"]
+
+[tool.setuptools.package-data]
+iot_sim = ["static/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+

@@ -1,0 +1,8 @@
+asyncua==2.0.1
+paho-mqtt==2.1.0
+pymodbus==3.13.1
+fastapi==0.139.0
+uvicorn==0.51.0
+pydantic==2.13.4
+PyYAML==6.0.3
+

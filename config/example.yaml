@@ -1,0 +1,30 @@
+version: 1
+random_seed: 42
+web:
+  host: 127.0.0.1
+  port: 8080
+opcua:
+  enabled: true
+  host: 0.0.0.0
+  port: 4840
+  endpoint_path: /iot-simulator/
+  server_name: PLCnext IoT Simulator
+  application_uri: urn:plcnext:iot-simulator
+  namespace_uri: urn:plcnext:iot-simulator:devices
+mqtt:
+  enabled: true
+  host: mosquitto
+  port: 1883
+  protocol_version: '3.1.1'
+  client_id: plcnext-iot-simulator
+  keepalive: 60
+  username: null
+  password_env: MQTT_PASSWORD
+  reconnect_min_seconds: 1
+  reconnect_max_seconds: 30
+  max_inflight_messages: 20
+  max_queued_messages: 1000
+modbus:
+  enabled: true
+  host: 0.0.0.0
+  port: 1502
