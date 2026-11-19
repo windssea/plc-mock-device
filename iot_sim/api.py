@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -13,6 +15,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from .config_store import ConfigConflictError
+from .device_types import (
+    CATALOG_VERSION,
+    DEVICE_TYPES,
+    DeviceFromTypeRequest,
+    build_device_from_type,
+    describe_device_type,
+    suggest,
+)
 from .models import (
     REDACTED_PASSWORD,
     AppConfig,
@@ -22,6 +32,7 @@ from .models import (
 from .runtime import ApplyResult, RuntimeManager
 from .state import DesiredState
 
+logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).with_name("static")
 CONSOLE_CACHE_CONTROL = "no-store, no-cache, must-revalidate, max-age=0"
 
@@ -63,6 +74,18 @@ def _safe_validation_errors(exc) -> list[dict]:
         {key: value for key, value in item.items() if key != "ctx"}
         for item in exc.errors()
     ])
+
+
+def _from_type_errors(exc: ValidationError) -> list[dict]:
+    public = [
+        {
+            "loc": list(item.get("loc") or ()),
+            "msg": item.get("msg", ""),
+            "type": item.get("type", "value_error"),
+        }
+        for item in exc.errors()
+    ]
+    return _redact_password_fields(public)
 
 
 def _redacted_config(config: AppConfig) -> dict:
@@ -232,6 +255,21 @@ def create_app(config_path: str, database_path: str | None = None) -> FastAPI:
             raise HTTPException(503, manager.config_error or "configuration is unavailable")
         return [item.model_dump(mode="json") for item in manager.config.devices]
 
+    @app.get("/api/v1/device-types")
+    async def list_device_types():
+        if manager.config is None:
+            raise HTTPException(503, manager.config_error or "configuration is unavailable")
+        return {
+            "catalog_version": CATALOG_VERSION,
+            "types": [
+                {
+                    **describe_device_type(device_type),
+                    "suggestion": suggest(manager.config, device_type),
+                }
+                for device_type in DEVICE_TYPES
+            ],
+        }
+
     @app.get("/api/v1/mqtt/connections")
     async def list_mqtt_connections():
         if manager.config is None:
@@ -281,6 +319,30 @@ def create_app(config_path: str, database_path: str | None = None) -> FastAPI:
     @app.post("/api/v1/devices")
     async def create_device(device: DeviceConfig):
         return _result_response(await manager.replace_device(None, device))
+
+    @app.post("/api/v1/devices/from-type")
+    async def create_device_from_type(request: DeviceFromTypeRequest):
+        if manager.config is None:
+            raise HTTPException(503, manager.config_error or "configuration is unavailable")
+        try:
+            device = build_device_from_type(manager.config, request)
+            result = await manager.replace_device(None, device)
+        except ValidationError as exc:
+            raise HTTPException(422, _from_type_errors(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, [{"loc": [], "msg": str(exc), "type": "value_error"}]) from exc
+        created = next(item for item in result.config.devices if item.id == device.id)
+        logger.info(
+            "Created device %s from type %s protocol=%s revision=%s",
+            created.id,
+            request.type_id,
+            created.protocol.value,
+            result.config.config_revision,
+        )
+        payload = json.loads(_result_response(result).body)
+        payload["device"] = created.model_dump(mode="json")
+        restarted = bool(result.restarted_adapters or result.restart_required)
+        return JSONResponse(payload, status_code=202 if restarted else 200)
 
     @app.get("/api/v1/devices/{device_id}")
     async def get_device(device_id: str):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -533,3 +534,223 @@ def test_mqtt_callback_ignores_event_loop_close_race() -> None:
     adapter = MQTTAdapter()
     adapter._loop = ClosingLoop()  # type: ignore[assignment]  # noqa: SLF001
     adapter._dispatch_connection_state("default", True, None)  # noqa: SLF001
+
+
+def _assert_from_type_error(response, message: str) -> dict:
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, list) and detail
+    error = detail[0]
+    assert set(error) == {"loc", "msg", "type"}
+    assert error["loc"] == []
+    assert error["type"] == "value_error"
+    assert message in error["msg"]
+    return error
+
+
+def _modbus_shell(unit: int) -> dict:
+    return {
+        "id": f"unit-{unit}",
+        "name": f"Unit {unit}",
+        "enabled": True,
+        "desired_state": "stopped",
+        "protocol": "modbus",
+        "protocol_config": {"unit_id": unit},
+        "signals": [],
+    }
+
+
+def test_device_type_catalog_suggests_the_next_free_modbus_slot(tmp_path: Path) -> None:
+    path = tmp_path / "catalog.yaml"
+    payload = config_dict()
+    payload["devices"] = [{
+        "id": "modbus-001",
+        "name": "Pressure",
+        "enabled": True,
+        "desired_state": "stopped",
+        "protocol": "modbus",
+        "protocol_config": {"unit_id": 1},
+        "signals": [{
+            "id": "pressure",
+            "name": "压力",
+            "unit": "bar",
+            "value_type": "float32",
+            "generator": {"type": "random_range", "min": 1, "max": 10, "precision": 2},
+            "binding": {
+                "type": "modbus",
+                "table": "input_register",
+                "address": 0,
+                "wire_type": "float32",
+            },
+        }],
+    }]
+    payload["mqtt"]["password"] = "mqtt-plain-value"
+    write_config(path, payload)
+    with TestClient(create_app(str(path))) as client:
+        response = client.get("/api/v1/device-types")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["catalog_version"] == 1
+        assert [item["id"] for item in body["types"]] == [
+            "opcua.generic",
+            "mqtt.counter",
+            "modbus.pressure",
+            "mqtt.temperature",
+            "mqtt.power_meter",
+            "mqtt.tank",
+        ]
+        pressure = body["types"][2]
+        assert pressure["suggestion"] == {
+            "device_id": "modbus-002",
+            "name": "Modbus 压力设备 002",
+            "topic": None,
+            "node_ids": {},
+            "unit_id": 2,
+            "addresses": {"pressure": 0},
+            "allocatable": True,
+            "error": None,
+        }
+        assert pressure["defaults"] == {}
+        assert "mqtt-plain-value" not in response.text
+        for word in ("password", "password_env", "secret", "token"):
+            assert word not in response.text
+
+
+def test_device_type_catalog_keeps_every_type_when_units_are_exhausted(tmp_path: Path) -> None:
+    path = tmp_path / "full-units.yaml"
+    payload = config_dict()
+    payload["devices"] = [_modbus_shell(unit) for unit in range(1, 248)]
+    payload["opcua"]["enabled"] = False
+    payload["modbus"]["enabled"] = False
+    write_config(path, payload)
+    with TestClient(create_app(str(path))) as client:
+        response = client.get("/api/v1/device-types")
+        assert response.status_code == 200
+        types = response.json()["types"]
+        assert len(types) == 6
+        by_id = {item["id"]: item["suggestion"] for item in types}
+        assert by_id["modbus.pressure"]["allocatable"] is False
+        assert by_id["modbus.pressure"]["unit_id"] is None
+        assert by_id["modbus.pressure"]["device_id"] == "modbus-001"
+        assert by_id["modbus.pressure"]["error"] == "Modbus unit_id space exhausted (1-247)"
+        for type_id, suggestion in by_id.items():
+            if type_id == "modbus.pressure":
+                continue
+            assert suggestion["allocatable"] is True
+            assert suggestion["error"] is None
+
+
+def test_create_device_from_type_persists_and_restarts_only_that_adapter(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "from-type.yaml"
+    payload = BootstrapConfig().to_app_config().model_dump(mode="json")
+    payload["opcua"]["enabled"] = False
+    payload["modbus"]["enabled"] = False
+    write_config(path, payload)
+    caplog.set_level(logging.INFO, logger="iot_sim.api")
+    with TestClient(create_app(str(path))) as client:
+        before = client.get("/api/v1/config").json()["config_revision"]
+        response = client.post("/api/v1/devices/from-type", json={
+            "type_id": "modbus.pressure",
+            "desired_state": "stopped",
+            "unit_id": 2,
+            "address_base": 10,
+        })
+        assert response.status_code == 202
+        body = response.json()
+        assert body["config"]["config_revision"] == before + 1
+        assert body["restarted_adapters"] == ["modbus"]
+        assert body["restart_required"] == []
+        assert body["restarted_devices"] == ["modbus-001"]
+        device = body["device"]
+        assert device["id"] == "modbus-001"
+        assert device["name"] == "Modbus 压力设备 001"
+        assert device["desired_state"] == "stopped"
+        assert device["protocol_config"] == {"unit_id": 2}
+        binding = device["signals"][0]["binding"]
+        assert binding["address"] == 10
+        assert binding["register_length"] == 2
+        assert binding["table"] == "input_register"
+
+        handwritten = config_dict()["devices"][0]
+        created = client.post("/api/v1/devices", json=handwritten)
+        assert created.status_code == 202
+        assert [item["id"] for item in created.json()["config"]["devices"]] == [
+            "modbus-001",
+            "mqtt-1",
+        ]
+
+    with TestClient(create_app(str(path))) as client:
+        devices = client.get("/api/v1/devices").json()
+        assert [item["id"] for item in devices] == ["modbus-001", "mqtt-1"]
+    messages = [record.getMessage() for record in caplog.records if record.name == "iot_sim.api"]
+    assert "Created device modbus-001 from type modbus.pressure protocol=modbus revision=1" in messages
+    assert all("telemetry" not in message for message in messages)
+
+
+def test_from_type_errors_are_lists_and_do_not_leak_the_stored_password(tmp_path: Path) -> None:
+    path = tmp_path / "from-type-errors.yaml"
+    payload = config_dict()
+    payload["mqtt"]["username"] = "mqtt"
+    payload["mqtt"]["password"] = "mqtt-plain-value"
+    payload["devices"].append({
+        "id": "taken",
+        "name": "Taken",
+        "enabled": True,
+        "desired_state": "stopped",
+        "protocol": "modbus",
+        "protocol_config": {"unit_id": 2},
+        "signals": [],
+    })
+    write_config(path, payload)
+    with TestClient(create_app(str(path))) as client:
+        unknown = client.post("/api/v1/devices/from-type", json={"type_id": "missing.type"})
+        _assert_from_type_error(unknown, "unknown device type: missing.type")
+
+        wrong_protocol = client.post(
+            "/api/v1/devices/from-type",
+            json={"type_id": "opcua.generic", "unit_id": 2},
+        )
+        _assert_from_type_error(wrong_protocol, "unit_id does not apply to protocol opcua")
+
+        both_addresses = client.post("/api/v1/devices/from-type", json={
+            "type_id": "modbus.pressure",
+            "address_base": 10,
+            "addresses": {"pressure": 4},
+        })
+        _assert_from_type_error(both_addresses, "address_base and addresses are mutually exclusive")
+
+        duplicate = client.post("/api/v1/devices/from-type", json={
+            "type_id": "modbus.pressure",
+            "device_id": "modbus-009",
+            "unit_id": 2,
+        })
+        _assert_from_type_error(duplicate, "duplicate Modbus unit_id")
+        assert "input" not in duplicate.text
+        for response in (unknown, wrong_protocol, both_addresses, duplicate):
+            assert "mqtt-plain-value" not in response.text
+
+        created = client.post("/api/v1/devices/from-type", json={
+            "type_id": "mqtt.temperature",
+            "desired_state": "stopped",
+        })
+        assert created.status_code == 202
+        assert "mqtt-plain-value" not in created.text
+        assert created.json()["config"]["mqtt"]["password"] == "********"
+        assert created.json()["config"]["mqtt_connections"][0]["password"] == "********"
+        stored = client.app.state.manager.store.load_sync()
+        assert stored.mqtt.password == "mqtt-plain-value"
+        assert stored.mqtt_connections[0].password == "mqtt-plain-value"
+
+
+def test_device_type_routes_use_the_same_unavailable_configuration_error(tmp_path: Path) -> None:
+    path = tmp_path / "broken.yaml"
+    path.write_text("devices: [", encoding="utf-8")
+    with TestClient(create_app(str(path))) as client:
+        devices = client.get("/api/v1/devices")
+        listing = client.get("/api/v1/device-types")
+        created = client.post("/api/v1/devices/from-type", json={"type_id": "mqtt.counter"})
+        assert devices.status_code == listing.status_code == created.status_code == 503
+        assert listing.json()["detail"] == devices.json()["detail"]
+        assert created.json()["detail"] == devices.json()["detail"]

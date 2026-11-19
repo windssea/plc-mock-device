@@ -7,6 +7,9 @@ let errorId = 0;
 let activeProtocol = 'opcua';
 let protocolConfigDrafts = {};
 let editingMqttConnectionId = null;
+let deviceTypeCatalog = [];
+let deviceTypeDraft = null;
+let deviceTypeLoad = 0;
 
 async function api(path, options = {}) {
   const response = await fetch('/api/v1' + path, {
@@ -406,6 +409,30 @@ function updateMqttConnectionInProtocolText() {
   protocolConfigDrafts.mqtt = textarea.value;
 }
 
+function syncDeviceProtocolHelpers(protocol, protocolConfig) {
+  const unitWrap = $('#deviceUnitIdField');
+  const topicWrap = $('#deviceTopicField');
+  unitWrap.hidden = protocol !== 'modbus';
+  topicWrap.hidden = protocol !== 'mqtt';
+  if (!protocolConfig) return;
+  if (protocol === 'modbus') {
+    unitWrap.querySelector('[data-device-field="unit_id"]').value = protocolConfig.unit_id ?? '';
+  }
+  if (protocol === 'mqtt') {
+    topicWrap.querySelector('[data-device-field="topic"]').value = protocolConfig.topic ?? '';
+  }
+}
+
+function writeHelperIntoProtocolConfig(key, value) {
+  const textarea = $('#deviceForm [name=protocol_config]');
+  const parsed = parseProtocolConfig(textarea.value);
+  if (!parsed) return;
+  if (value === '' || value == null) delete parsed[key];
+  else parsed[key] = value;
+  textarea.value = JSON.stringify(parsed, null, 2);
+  protocolConfigDrafts[activeProtocol] = textarea.value;
+}
+
 function switchProtocolConfig(protocol) {
   const textarea = $('#deviceForm [name=protocol_config]');
   const deviceId = $('#deviceForm [name=id]').value.trim() || 'device-001';
@@ -416,7 +443,9 @@ function switchProtocolConfig(protocol) {
   textarea.value = next.text;
   activeProtocol = protocol;
   $('#protocolConfigHelp').textContent = protocolHelp(protocol);
-  syncMqttDeviceConnectionField(protocol, parseProtocolConfig(textarea.value));
+  const parsedProtocolConfig = parseProtocolConfig(textarea.value);
+  syncMqttDeviceConnectionField(protocol, parsedProtocolConfig);
+  syncDeviceProtocolHelpers(protocol, parsedProtocolConfig);
 }
 
 function addSignal(source = {}) {
@@ -517,6 +546,7 @@ function openDevice(device = null) {
   protocolConfigDrafts = {[activeProtocol]: form.protocol_config.value};
   $('#protocolConfigHelp').textContent = protocolHelp(activeProtocol);
   syncMqttDeviceConnectionField(activeProtocol, initialProtocolConfig);
+  syncDeviceProtocolHelpers(activeProtocol, initialProtocolConfig);
   $('#signalEditor').innerHTML = '';
   (device?.signals || []).forEach(addSignal);
   $('#dialogTitle').textContent = device ? '编辑设备' : '新增设备';
@@ -623,17 +653,329 @@ $('#deviceForm').onsubmit = async event => {
   }
 };
 
+function typeField(name) {
+  return $(`#deviceTypeForm [data-type-field="${name}"]`);
+}
+
+function readDeviceTypeDraft() {
+  const selectedId = typeField('type_id').value;
+  const type = deviceTypeCatalog.find(item => item.id === selectedId) || deviceTypeDraft?.type || null;
+  const nodeIds = {};
+  $$('#deviceTypeNodeOverrides [data-type-node]').forEach(input => {
+    nodeIds[input.dataset.typeNode] = input.value;
+  });
+  return {
+    type,
+    deviceId: typeField('device_id').value,
+    name: typeField('name').value,
+    nameDirty: Boolean(deviceTypeDraft?.nameDirty),
+    enabled: typeField('enabled').checked,
+    desiredState: typeField('desired_state').value,
+    connectionId: typeField('connection_id').value,
+    topic: typeField('topic').value,
+    topicDirty: Boolean(deviceTypeDraft?.topicDirty),
+    qos: typeField('qos').value,
+    retain: typeField('retain').checked,
+    payloadMode: typeField('payload_mode').value,
+    publishIntervalMs: typeField('publish_interval_ms').value,
+    unitId: typeField('unit_id').value,
+    addressBase: typeField('address_base').value,
+    nodeIds,
+  };
+}
+
+function writeDeviceTypeFields(draft) {
+  typeField('device_id').value = draft.deviceId || '';
+  typeField('name').value = draft.name || '';
+  typeField('enabled').checked = draft.enabled !== false;
+  typeField('desired_state').value = draft.desiredState || 'running';
+  typeField('topic').value = draft.topic || '';
+  typeField('qos').value = draft.qos === '' || draft.qos == null ? '0' : String(draft.qos);
+  typeField('retain').checked = Boolean(draft.retain);
+  typeField('payload_mode').value = draft.payloadMode || 'nested';
+  typeField('publish_interval_ms').value = draft.publishIntervalMs ?? '';
+  typeField('unit_id').value = draft.unitId ?? '';
+  typeField('address_base').value = draft.addressBase ?? '';
+}
+
+function renderDeviceTypeConnections(selected) {
+  const select = typeField('connection_id');
+  const connections = mqttConnectionList();
+  select.innerHTML = connections.map(connection => {
+    const suffix = connection.enabled ? '' : '，已停用';
+    return `<option value="${esc(connection.id)}">${esc(connection.name)} (${esc(connection.id)}${suffix})</option>`;
+  }).join('');
+  if (selected && !connections.some(connection => connection.id === selected)) {
+    select.insertAdjacentHTML('beforeend', `<option value="${esc(selected)}">未知连接 (${esc(selected)})</option>`);
+  }
+  if (selected) select.value = selected;
+}
+
+function renderDeviceTypeNodeOverrides(type) {
+  const root = $('#deviceTypeNodeOverrides');
+  if (!type || type.protocol !== 'opcua') {
+    root.replaceChildren();
+    return;
+  }
+  root.innerHTML = (type.signals || []).map(signal => `
+    <label>${esc(signal.name || signal.id)} 的 NodeId 覆盖
+      <input data-type-node="${esc(signal.id)}" value="" placeholder="留空则不覆盖">
+    </label>`).join('');
+}
+
+function renderDeviceTypeNodePreview(draft) {
+  const box = $('#deviceTypeNodePreview');
+  if (!draft?.type || draft.type.protocol !== 'opcua') {
+    box.textContent = '';
+    return;
+  }
+  const suggestion = DeviceTypeForm.suggestionForDeviceId(draft.type, String(draft.deviceId || '').trim());
+  const lines = (draft.type.signals || [])
+    .filter(signal => !String(draft.nodeIds?.[signal.id] || '').trim())
+    .map(signal => `${signal.id}：${suggestion.node_ids[signal.id] || ''}`);
+  box.textContent = lines.length ? `未覆盖点：${lines.join('；')}` : '所有点都已填写 NodeId 覆盖。';
+}
+
+function renderDeviceTypeAddressPreview(draft) {
+  const box = $('#deviceTypeAddressPreview');
+  if (!draft?.type || draft.type.protocol !== 'modbus') {
+    box.textContent = '';
+    return;
+  }
+  const text = String(draft.addressBase ?? '').trim();
+  if (text !== '' && (!/^\d+$/.test(text) || Number(text) > 65535)) {
+    box.textContent = '起始地址需要是 0 到 65535 的整数。';
+    return;
+  }
+  box.textContent = DeviceTypeForm.modbusAddressLines(draft.type, text === '' ? 0 : Number(text)).join('；');
+}
+
+function renderDeviceTypeProtocol(type) {
+  $('#deviceTypeMqttFields').hidden = type.protocol !== 'mqtt';
+  $('#deviceTypeModbusFields').hidden = type.protocol !== 'modbus';
+  $('#deviceTypeOpcuaFields').hidden = type.protocol !== 'opcua';
+  $('#deviceTypeDescription').textContent = type.description || '';
+}
+
+function clearDeviceTypeErrors() {
+  const form = $('#deviceTypeForm');
+  form.querySelectorAll('.field-error').forEach(element => element.remove());
+  form.querySelectorAll('.field-invalid').forEach(element => {
+    element.classList.remove('field-invalid');
+    element.removeAttribute('aria-invalid');
+    element.removeAttribute('aria-describedby');
+  });
+  const summary = $('#deviceTypeErrors');
+  summary.hidden = true;
+  summary.replaceChildren();
+}
+
+function typeErrorField(field) {
+  if (field === 'node_ids') {
+    return $('#deviceTypeNodeOverrides [data-type-node]') || $('#deviceTypeNodeOverrides');
+  }
+  return typeField(field);
+}
+
+function isTypeFieldFocusable(field) {
+  if (!field || field.disabled) return false;
+  return !field.closest('[hidden]');
+}
+
+function showDeviceTypeErrors(parsed, options = {}) {
+  clearDeviceTypeErrors();
+  const items = parsed?.items || [];
+  if (!items.length) return true;
+  const summary = $('#deviceTypeErrors');
+  const heading = document.createElement('strong');
+  heading.textContent = parsed.title;
+  const list = document.createElement('ul');
+  summary.append(heading, list);
+  let firstField = null;
+  items.forEach(item => {
+    const entry = document.createElement('li');
+    entry.textContent = item.message;
+    list.append(entry);
+    const field = item.field ? typeErrorField(item.field) : null;
+    if (!field) return;
+    field.classList.add('field-invalid');
+    field.setAttribute('aria-invalid', 'true');
+    const inline = document.createElement('small');
+    inline.className = 'field-error';
+    inline.id = `device-type-error-${++errorId}`;
+    inline.textContent = item.message;
+    const label = field.closest('label');
+    if (label) label.append(inline);
+    else field.insertAdjacentElement('afterend', inline);
+    const describedBy = [field.getAttribute('aria-describedby'), inline.id].filter(Boolean).join(' ');
+    field.setAttribute('aria-describedby', describedBy);
+    const details = field.closest('details');
+    if (details) details.open = true;
+    if (!firstField && isTypeFieldFocusable(field)) firstField = field;
+  });
+  summary.hidden = false;
+  if (options.focus !== false) (firstField || summary).focus();
+  if (options.toast !== false) toast(parsed.text, true);
+  return false;
+}
+
+function applyDeviceType(type) {
+  deviceTypeDraft = DeviceTypeForm.draftFromType(type);
+  typeField('type_id').value = type.id;
+  renderDeviceTypeProtocol(type);
+  renderDeviceTypeConnections(deviceTypeDraft.connectionId);
+  writeDeviceTypeFields(deviceTypeDraft);
+  renderDeviceTypeNodeOverrides(type);
+  renderDeviceTypeNodePreview(deviceTypeDraft);
+  renderDeviceTypeAddressPreview(deviceTypeDraft);
+  clearDeviceTypeErrors();
+  const allocationError = type.suggestion?.error;
+  if (type.suggestion && type.suggestion.allocatable === false && allocationError) {
+    showDeviceTypeErrors(DeviceTypeForm.errorsFromApi({
+      detail: [{loc: [], msg: allocationError, type: 'value_error'}],
+    }), {toast: false, focus: false});
+  }
+}
+
+async function openDeviceTypeDialog() {
+  const token = ++deviceTypeLoad;
+  const dialog = $('#deviceTypeDialog');
+  $('#deviceTypeForm').reset();
+  deviceTypeDraft = null;
+  deviceTypeCatalog = [];
+  clearDeviceTypeErrors();
+  $('#deviceTypeDescription').textContent = '正在读取设备类型…';
+  $('#deviceTypeMqttFields').hidden = true;
+  $('#deviceTypeModbusFields').hidden = true;
+  $('#deviceTypeOpcuaFields').hidden = true;
+  $('#deviceTypeAddressPreview').textContent = '';
+  $('#deviceTypeNodePreview').textContent = '';
+  $('#deviceTypeNodeOverrides').replaceChildren();
+  typeField('type_id').replaceChildren();
+  dialog.showModal();
+  let response;
+  let data;
+  try {
+    response = await fetch('/api/v1/device-types');
+    const body = await response.text();
+    try {
+      data = body ? JSON.parse(body) : null;
+    } catch {
+      data = {detail: body || 'device types are unavailable'};
+    }
+  } catch (error) {
+    if (token !== deviceTypeLoad || !dialog.open) return;
+    showDeviceTypeErrors(DeviceTypeForm.errorsFromApi({detail: error.message || 'device types are unavailable'}));
+    return;
+  }
+  if (token !== deviceTypeLoad || !dialog.open) return;
+  if (!response.ok) {
+    showDeviceTypeErrors(DeviceTypeForm.errorsFromApi(data || {detail: 'device types are unavailable'}));
+    return;
+  }
+  deviceTypeCatalog = Array.isArray(data?.types) ? data.types : [];
+  typeField('type_id').innerHTML = deviceTypeCatalog.map(type => {
+    const unavailable = type.suggestion && type.suggestion.allocatable === false ? '（当前无法分配）' : '';
+    return `<option value="${esc(type.id)}">${esc(type.name)} (${esc(type.protocol)})${unavailable}</option>`;
+  }).join('');
+  if (!deviceTypeCatalog.length) {
+    showDeviceTypeErrors(DeviceTypeForm.errorsFromApi({detail: '没有可用的设备类型。'}));
+    return;
+  }
+  applyDeviceType(deviceTypeCatalog[0]);
+}
+
+function onDeviceTypeInput(event) {
+  if (!deviceTypeDraft || event.target.matches('[data-type-field="type_id"]')) return;
+  if (event.target.matches('[data-type-field="name"]')) deviceTypeDraft.nameDirty = true;
+  if (event.target.matches('[data-type-field="topic"]')) deviceTypeDraft.topicDirty = true;
+  if (event.target.matches('[data-type-field="device_id"]')) {
+    deviceTypeDraft = DeviceTypeForm.syncDraftForDeviceId(readDeviceTypeDraft(), event.target.value);
+    if (!deviceTypeDraft.nameDirty) typeField('name').value = deviceTypeDraft.name;
+    if (!deviceTypeDraft.topicDirty) typeField('topic').value = deviceTypeDraft.topic || '';
+    renderDeviceTypeNodePreview(deviceTypeDraft);
+  } else {
+    deviceTypeDraft = readDeviceTypeDraft();
+    if (event.target.matches('[data-type-node], [data-type-field="address_base"]')) {
+      renderDeviceTypeNodePreview(deviceTypeDraft);
+      renderDeviceTypeAddressPreview(deviceTypeDraft);
+    }
+  }
+  clearDeviceTypeErrors();
+}
+
+async function submitDeviceFromType(event) {
+  event.preventDefault();
+  const draft = readDeviceTypeDraft();
+  deviceTypeDraft = draft;
+  const clientErrors = DeviceTypeForm.validateFromTypeRequest(draft);
+  if (clientErrors.items.length) {
+    showDeviceTypeErrors(clientErrors);
+    return;
+  }
+  const request = DeviceTypeForm.buildFromTypeRequest(draft);
+  let response;
+  let data;
+  try {
+    response = await fetch('/api/v1/devices/from-type', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(request),
+    });
+    const body = await response.text();
+    try {
+      data = body ? JSON.parse(body) : null;
+    } catch {
+      data = {detail: body};
+    }
+  } catch (error) {
+    showDeviceTypeErrors(DeviceTypeForm.errorsFromApi({detail: error.message || '创建失败'}));
+    return;
+  }
+  if (!response.ok) {
+    showDeviceTypeErrors(DeviceTypeForm.errorsFromApi(data));
+    return;
+  }
+  $('#deviceTypeDialog').close();
+  try {
+    await loadConfig();
+  } catch (error) {
+    toast(error.message, true);
+    return;
+  }
+  await loadStatus();
+  toast(DeviceTypeForm.deviceTypeResultMessage(data?.device?.id || request.device_id || draft.deviceId, data));
+}
+
 $('#newDevice').onclick = () => openDevice();
+$('#newDeviceFromType').onclick = () => openDeviceTypeDialog();
 $('#newMqttConnection').onclick = () => openMqttConnection();
 $('#addSignal').onclick = () => addSignal();
 $('#closeDialog').onclick = $('#cancelDevice').onclick = () => $('#deviceDialog').close();
 $('#closeMqttConnectionDialog').onclick = $('#cancelMqttConnection').onclick = () => $('#mqttConnectionDialog').close();
 $('#deviceForm').addEventListener('input', event => {
   if (event.target.matches('input, select, textarea')) clearValidationErrors(event.currentTarget);
-  if (event.target.name === 'protocol_config' && activeProtocol === 'mqtt') {
-    syncMqttDeviceConnectionField('mqtt', parseProtocolConfig(event.target.value));
+  if (event.target.name === 'protocol_config') {
+    const parsed = parseProtocolConfig(event.target.value);
+    if (activeProtocol === 'mqtt') syncMqttDeviceConnectionField('mqtt', parsed);
+    if (parsed) syncDeviceProtocolHelpers(activeProtocol, parsed);
   }
 });
+$('#deviceForm [data-device-field="unit_id"]').addEventListener('input', event => {
+  const raw = event.target.value.trim();
+  if (raw === '') writeHelperIntoProtocolConfig('unit_id', '');
+  else if (/^\d+$/.test(raw)) writeHelperIntoProtocolConfig('unit_id', Number(raw));
+});
+$('#deviceForm [data-device-field="topic"]').addEventListener('input', event => {
+  writeHelperIntoProtocolConfig('topic', event.target.value);
+});
+$('#closeDeviceTypeDialog').onclick = $('#cancelDeviceType').onclick = () => $('#deviceTypeDialog').close();
+$('#deviceTypeForm').addEventListener('input', onDeviceTypeInput);
+$('#deviceTypeForm [data-type-field="type_id"]').addEventListener('change', () => {
+  const type = deviceTypeCatalog.find(item => item.id === typeField('type_id').value);
+  if (type) applyDeviceType(type);
+});
+$('#deviceTypeForm').onsubmit = event => submitDeviceFromType(event);
 $('#deviceForm [name=mqtt_connection_id]').onchange = updateMqttConnectionInProtocolText;
 $('#deviceForm [name=protocol]').onchange = () => {
   const protocol = $('#deviceForm [name=protocol]').value;

@@ -23,7 +23,13 @@
       <div class="panel"><h2>设备状态</h2><div id="statusTable"></div></div>
     </section>
     <section id="devices" class="tab">
-      <div class="toolbar"><h2>设备</h2><button id="newDevice" class="primary">新增设备</button></div>
+      <div class="toolbar">
+        <h2>设备</h2>
+        <div>
+          <button id="newDevice" class="primary">新增设备</button>
+          <button id="newDeviceFromType" type="button">从类型新增</button>
+        </div>
+      </div>
       <div id="deviceTable" class="panel"></div>
     </section>
     <section id="config" class="tab">
@@ -109,10 +115,53 @@
         <label><input name="enabled" type="checkbox" checked> 启用</label>
         <label>期望状态<select name="desired_state"><option value="running">运行</option><option value="stopped">暂停</option></select></label>
       </div>
+      <div class="grid">
+        <label id="deviceUnitIdField" hidden>Unit ID<input data-device-field="unit_id" type="number" min="1" max="247" step="1"><small class="field-help">写入下方 JSON 的 unit_id。JSON 无法解析时不会覆盖文本框。</small></label>
+        <label id="deviceTopicField" hidden>MQTT topic<input data-device-field="topic" maxlength="65535"><small class="field-help">写入下方 JSON 的 topic。JSON 无法解析时不会覆盖文本框。</small></label>
+      </div>
       <label>协议参数（JSON）<textarea name="protocol_config" class="small-code" aria-describedby="protocolConfigHelp">{}</textarea><small id="protocolConfigHelp" class="field-help" aria-live="polite">OPC UA 可使用空对象 {}，也可设置 object_name。</small></label>
       <div class="toolbar"><h3>数据点</h3><button type="button" id="addSignal">新增数据点</button></div>
       <div id="signalEditor"></div>
       <div class="dialog-actions"><button type="button" id="cancelDevice">取消</button><button type="submit" class="primary">保存设备</button></div>
+    </form>
+  </dialog>
+  <dialog id="deviceTypeDialog">
+    <form id="deviceTypeForm" method="dialog" novalidate>
+      <div class="toolbar"><h2>从类型新增</h2><button type="button" id="closeDeviceTypeDialog">关闭</button></div>
+      <p class="hint">监听地址、端口和 Broker 在「协议与配置」修改；这里只设置这台设备的编号、topic、NodeId 或 Unit ID。</p>
+      <div id="deviceTypeErrors" class="error-summary" role="alert" aria-live="assertive" tabindex="-1" hidden></div>
+      <div class="grid">
+        <label>类型<select data-type-field="type_id" required></select><small id="deviceTypeDescription" class="field-help"></small></label>
+        <label>设备编号<input data-type-field="device_id" maxlength="128" pattern="[A-Za-z0-9_.\-]+" autocomplete="off"><small class="field-help">留空则由服务端分配下一个编号。</small></label>
+        <label>名称<input data-type-field="name" maxlength="256"></label>
+        <label><input data-type-field="enabled" type="checkbox" checked> 启用</label>
+        <label>期望状态<select data-type-field="desired_state"><option value="running">运行</option><option value="stopped">暂停</option></select></label>
+      </div>
+      <div id="deviceTypeMqttFields" hidden>
+        <div class="grid">
+          <label>MQTT 连接<select data-type-field="connection_id"></select><small class="field-help">停用的连接仍可选择，服务端可能拒绝。不显示密码。</small></label>
+          <label>topic<input data-type-field="topic" maxlength="65535"></label>
+          <label>QoS<select data-type-field="qos"><option value="0">0</option><option value="1">1</option><option value="2">2</option></select></label>
+          <label><input data-type-field="retain" type="checkbox"> retain</label>
+          <label>payload 模式<select data-type-field="payload_mode"><option value="nested">nested</option><option value="flat">flat</option><option value="values">values</option></select></label>
+          <label>发布周期（ms）<input data-type-field="publish_interval_ms" type="number" min="1000" step="1"><small class="field-help">留空表示使用类型默认值。填写时最小 1000 ms。</small></label>
+        </div>
+      </div>
+      <div id="deviceTypeModbusFields" hidden>
+        <div class="grid">
+          <label>Unit ID<input data-type-field="unit_id" type="number" min="1" max="247" step="1"><small class="field-help">1–247。留空则由服务端分配下一个空闲 Unit ID。</small></label>
+          <label>起始 PDU 地址<input data-type-field="address_base" type="number" min="0" max="65535" step="1"><small class="field-help">零基 PDU，不要填 40001/30001。</small></label>
+        </div>
+        <p id="deviceTypeAddressPreview" class="field-help"></p>
+      </div>
+      <div id="deviceTypeOpcuaFields" hidden>
+        <p id="deviceTypeNodePreview" class="field-help"></p>
+        <details>
+          <summary>高级：覆盖 NodeId</summary>
+          <div id="deviceTypeNodeOverrides" class="grid" data-type-field="node_ids" tabindex="-1"></div>
+        </details>
+      </div>
+      <div class="dialog-actions"><button type="button" id="cancelDeviceType">取消</button><button type="submit" class="primary">创建</button></div>
     </form>
   </dialog>
   <dialog id="mqttConnectionDialog">
@@ -159,6 +208,7 @@
   <div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
   <script src="/static/signal-form.js"></script>
   <script src="/static/protocol-form.js"></script>
+  <script src="/static/device-type-form.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

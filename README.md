@@ -43,7 +43,7 @@ Compose 使用命名卷 `simulator-data` 持久化 SQLite 数据库，并将示�
 启动 YAML 严禁包含 `config_revision`、`devices` 或点位；首个数据库配置固定为 revision 0、空设备。
 设备、点位、协议参数的后续修改和 `desired_state` 全部通过页面/API 写入 SQLite。
 
-SQLite 数据库 schema 为 `user_version=2`，使用 metadata、四类全局 settings、设备、协议配置、
+SQLite 数据库 schema 为 `user_version=3`，使用 metadata、四类全局 settings、设备、协议配置、
 点位、生成器和 mapping 子表组成的标准关系图，不保存整配置 JSON/blob。设备和点位显式保存
 顺序；无界 seed 与生成器/缩放数值按独立 canonical number token 文本无损保存，包括大整数和
 `-0.0`。数据库启用 WAL、`synchronous=FULL`、foreign keys 和 5 秒 busy timeout；完整关系图在
@@ -53,9 +53,7 @@ SQLite 数据库 schema 为 `user_version=2`，使用 metadata、四类全局 se
 数据库一旦存在配置记录，后续启动完全忽略 YAML，旧数据库升级不会因旁边保留旧格式 YAML 而
 改变。管理 API 的修改也不会回写启动 YAML。
 
-旧 `user_version=1` 单文档数据库会在首次打开时原子迁移为关系 schema v2：迁移会从关系表
-重建并重新执行完整 Pydantic、外键和完整性校验，全部成功后才删除旧表并提交；失败会完整保留
-v1 数据且不会回退启动 YAML。
+旧 `user_version=1` 单文档数据库会在首次打开时原子迁移到关系 schema v3（先建成 v2 关系图，再补上具名 MQTT 连接和设备 `connection_id`）；成功后才删除旧表并提交，失败则完整保留 v1 数据且不会回退启动 YAML。
 
 - 全局 `opcua`：监听地址、端口、endpoint path、application/namespace URI。
 - 全局 `mqtt`：broker、共享 client ID、协议版本、keepalive、重连和有界队列。密码通过
@@ -77,9 +75,12 @@ OpenAPI 页面位于 <http://127.0.0.1:8080/docs>，主要接口：
 - `GET/PUT /api/v1/config`、`POST /api/v1/config/validate`
 - `GET /api/v1/config/export`、`POST /api/v1/config/import`
 - `GET/POST /api/v1/devices`
+- `GET /api/v1/device-types`、`POST /api/v1/devices/from-type`
 - `GET/PUT/DELETE /api/v1/devices/{deviceId}`
 - `POST /api/v1/devices/{deviceId}/actions/start|stop`
 - `GET /api/v1/status`、`GET /api/v1/devices/{deviceId}/status`
+
+`GET /api/v1/device-types` 返回随版本发布的设备类型目录，以及按当前配置算出的建议编号和地址。`POST /api/v1/devices/from-type` 把所选类型展开成一台普通设备，再走与 `POST /api/v1/devices` 相同的写入路径。类型本身不入库，之后改目录不会改已有设备。
 
 配置写入使用异步串行锁、完整 schema/冲突校验和 SQLite 事务。协议应用失败时按预期 revision
 恢复上一版数据库配置和运行态，失败尝试不会消耗 revision。Modbus 拓扑或共享端点变化会重启整个 Modbus adapter；接口以 HTTP 202
@@ -122,3 +123,17 @@ python scripts/load_test.py
 测试覆盖配置校验与原子写入、生成器、Modbus 编解码和只读行为、OPC UA/Modbus 真实客户端
 冒烟、REST CRUD、状态切换及配置回滚。第三方许可证见
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+
+## 开发联调的固定运行环境与退出取证
+
+2026-10-26 当前联调用的是既有 `PLCnext-Engineer/tests/nativegateway-soak.db`，不是默认数据目录。旧 `.venv` 引用了已删除的解释器；当前采用 CPython3.12.13 的 `.venv-runtime` 和 `requirements.lock`。退出原因及4项无数据库隔离检查见 [排查记录](docs/managed-service-20261026.md)。
+
+已有托管实例时不要再次启动。需启动时，在仓库目录运行（已有DB/配置必须存在）：
+
+```powershell
+Start-Process -FilePath "$PWD/.venv-runtime/Scripts/python.exe" -WindowStyle Hidden -WorkingDirectory $PWD -ArgumentList @('scripts/run_managed.py', '--database', 'D:/work/code/PLCnext-Engineer/tests/nativegateway-soak.db', '--config', 'D:/work/code/PLCnext-Engineer/tests/mock-bootstrap.yaml', '--state-dir', '.local/mock-service')
+```
+
+`state.json` 是最后一次状态变化，不是实时心跳；实时健康查看 `http://127.0.0.1:18080/api/v1/status`。日志在 `.local/mock-service/`，包含子进程stdout/stderr和实际退出码；正常退出不重启，300秒内3次异常退出就停止。不会自动安装Windows服务、登录启动项或修改配置数据库。
+
+操作员停止标记是 `.local/mock-service/stop.request`；停止后应确认11502/18080均不再监听。Windows虚拟环境可能有解释器子进程，若停止后还有监听，应按日志核对本实例子进程身份后处理，不能结束其他Python服务。重新启动前由操作员显式移除停止标记。当前自动退出原因仍待下次退出日志确认，不把增加守护当作已经找到旧实例的死因。
