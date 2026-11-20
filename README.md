@@ -1,5 +1,7 @@
 # PLCnext IoT 虚拟设备模拟器
 
+跨项目协作入口：[六项目开发分工与全链路联调手册](../PLCnext-Hub-Backend/docs/architecture/six-project-integration-guide.md)。
+
 一个配置驱动、单进程的工业 IoT 数据模拟器。MQTT 设备通过共享客户端发布 JSON；OPC UA
 设备暴露只读节点；Modbus TCP 设备通过共享端口和 Unit ID 暴露只读数据点。所有值由同一个
 生成与调度内核产生，并可通过本地 Web 控制台管理。
